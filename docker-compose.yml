@@ -1,0 +1,77 @@
+# n8n + Postgres + Caddy (HTTPS automático).
+# Mercado Pago y Meta exigen HTTPS público para los webhooks: Caddy saca el
+# certificado de Let's Encrypt solo, apuntando el dominio (registro A) al VPS.
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: n8n
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d n8n"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:${N8N_VERSION:-latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: ${POSTGRES_USER}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_HOST: ${DOMAIN}
+      N8N_PROTOCOL: https
+      WEBHOOK_URL: https://${DOMAIN}/
+      GENERIC_TIMEZONE: America/Argentina/Buenos_Aires
+      TZ: America/Argentina/Buenos_Aires
+      # El nodo Code valida la firma de Mercado Pago con crypto (HMAC-SHA256).
+      NODE_FUNCTION_ALLOW_BUILTIN: crypto
+      # Los flujos leen tokens y números desde el .env vía $env.
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      MP_ACCESS_TOKEN: ${MP_ACCESS_TOKEN}
+      MP_WEBHOOK_SECRET: ${MP_WEBHOOK_SECRET}
+      WA_TOKEN: ${WA_TOKEN}
+      WA_PHONE_NUMBER_ID: ${WA_PHONE_NUMBER_ID}
+      WA_GRAPH_VERSION: ${WA_GRAPH_VERSION}
+      WA_TEMPLATE: ${WA_TEMPLATE}
+      WA_TEMPLATE_LANG: ${WA_TEMPLATE_LANG}
+      DUENO_WHATSAPP: ${DUENO_WHATSAPP}
+      SHEET_ID: ${SHEET_ID}
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: 336 # horas (14 días)
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./workflows:/workflows:ro
+    # Sin puertos públicos: solo Caddy lo expone.
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - n8n
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  postgres_data:
+  n8n_data:
+  caddy_data:
+  caddy_config:

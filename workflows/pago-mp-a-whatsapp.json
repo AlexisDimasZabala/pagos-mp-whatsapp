@@ -1,0 +1,179 @@
+{
+  "name": "Pago Mercado Pago -> Planilla + WhatsApp",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "mercadopago",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0001-4000-8000-000000000001",
+      "name": "Webhook Mercado Pago",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "5f1c2a9e-7d3b-4e8a-9c61-0a2b3c4d5e6f"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Valida que la notificación venga de Mercado Pago (header x-signature, HMAC-SHA256).\n// Doc: Mercado Pago -> Notificaciones -> Webhooks -> Validar origen.\nconst crypto = require('crypto');\nconst { headers = {}, query = {}, body = {} } = $input.first().json;\n\nconst tipo = body.type || query.type || query.topic;\nif (tipo !== 'payment') return []; // otros eventos (merchant_order, etc.): se ignoran\n\nconst dataId = String(query['data.id'] ?? body?.data?.id ?? '');\nconst firma = headers['x-signature'] || '';\nconst requestId = headers['x-request-id'] || '';\nconst partes = Object.fromEntries(\n  firma.split(',').map((p) => p.trim().split('=').map((s) => s.trim()))\n);\nconst { ts, v1 } = partes;\nif (!dataId || !ts || !v1) throw new Error('Notificación sin firma o sin data.id');\n\n// Si el id es alfanumérico, Mercado Pago pide usarlo en minúsculas.\nconst id = /^[a-z0-9]+$/i.test(dataId) ? dataId.toLowerCase() : dataId;\nlet manifest = `id:${id};`;\nif (requestId) manifest += `request-id:${requestId};`;\nmanifest += `ts:${ts};`;\n\nconst esperado = crypto\n  .createHmac('sha256', $env.MP_WEBHOOK_SECRET)\n  .update(manifest)\n  .digest('hex');\nconst ok =\n  esperado.length === v1.length &&\n  crypto.timingSafeEqual(Buffer.from(esperado), Buffer.from(v1));\nif (!ok) throw new Error('Firma de Mercado Pago inválida');\n\nreturn [{ json: { paymentId: dataId } }];"
+      },
+      "id": "a1b2c3d4-0002-4000-8000-000000000002",
+      "name": "Validar firma",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.mercadopago.com/v1/payments/{{ $json.paymentId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.MP_ACCESS_TOKEN }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0003-4000-8000-000000000003",
+      "name": "Consultar pago",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "c0ffee00-0000-4000-8000-000000000001",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "approved",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0004-4000-8000-000000000004",
+      "name": "¿Aprobado?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Deja solo los datos que le importan al dueño del negocio.\nreturn $input.all().map(({ json: p }) => {\n  const nombre = [p.payer?.first_name, p.payer?.last_name].filter(Boolean).join(' ');\n  const monto = new Intl.NumberFormat('es-AR', {\n    style: 'currency',\n    currency: p.currency_id || 'ARS',\n  }).format(p.transaction_amount);\n  return {\n    json: {\n      id_pago: String(p.id),\n      fecha: p.date_approved,\n      monto: p.transaction_amount,\n      monto_texto: monto,\n      medio: p.payment_method_id,\n      pagador: nombre || p.payer?.email || 'Cliente',\n      descripcion: p.description || 'Sin descripción',\n      referencia: p.external_reference || '',\n    },\n  };\n});"
+      },
+      "id": "a1b2c3d4-0005-4000-8000-000000000005",
+      "name": "Armar datos",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, -100]
+    },
+    {
+      "parameters": {
+        "operation": "removeItemsRepeatedInPreviousExecutions",
+        "dedupeValue": "={{ $json.id_pago }}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0006-4000-8000-000000000006",
+      "name": "Evitar duplicados",
+      "type": "n8n-nodes-base.removeDuplicates",
+      "typeVersion": 2,
+      "position": [1100, -100]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Pagos",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": ["id_pago"]
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0007-4000-8000-000000000007",
+      "name": "Registrar en planilla",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1320, -100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/{{ $env.WA_GRAPH_VERSION }}/{{ $env.WA_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.WA_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  messaging_product: 'whatsapp',\n  to: $env.DUENO_WHATSAPP,\n  type: 'template',\n  template: {\n    name: $env.WA_TEMPLATE,\n    language: { code: $env.WA_TEMPLATE_LANG },\n    components: [{\n      type: 'body',\n      parameters: [\n        { type: 'text', text: $('Armar datos').item.json.monto_texto },\n        { type: 'text', text: $('Armar datos').item.json.pagador },\n        { type: 'text', text: $('Armar datos').item.json.descripcion }\n      ]\n    }]\n  }\n}) }}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0008-4000-8000-000000000008",
+      "name": "Avisar por WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1540, -100]
+    }
+  ],
+  "connections": {
+    "Webhook Mercado Pago": {
+      "main": [[{ "node": "Validar firma", "type": "main", "index": 0 }]]
+    },
+    "Validar firma": {
+      "main": [[{ "node": "Consultar pago", "type": "main", "index": 0 }]]
+    },
+    "Consultar pago": {
+      "main": [[{ "node": "¿Aprobado?", "type": "main", "index": 0 }]]
+    },
+    "¿Aprobado?": {
+      "main": [
+        [{ "node": "Armar datos", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Armar datos": {
+      "main": [[{ "node": "Evitar duplicados", "type": "main", "index": 0 }]]
+    },
+    "Evitar duplicados": {
+      "main": [[{ "node": "Registrar en planilla", "type": "main", "index": 0 }]]
+    },
+    "Registrar en planilla": {
+      "main": [[{ "node": "Avisar por WhatsApp", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
